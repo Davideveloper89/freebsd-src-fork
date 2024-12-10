@@ -66,8 +66,7 @@ r92c_tx_set_ht40(struct rtwn_softc *sc, void *buf, struct ieee80211_node *ni)
 {
 	struct r92c_tx_desc *txd = (struct r92c_tx_desc *)buf;
 
-	if (ni->ni_chan != IEEE80211_CHAN_ANYC &&
-	    IEEE80211_IS_CHAN_HT40(ni->ni_chan)) {
+	if (ieee80211_ht_check_tx_ht40(ni)) {
 		int extc_offset;
 
 		extc_offset = r92c_tx_get_sco(sc, ni->ni_chan);
@@ -96,7 +95,7 @@ r92c_tx_protection(struct rtwn_softc *sc, struct r92c_tx_desc *txd,
 
 	if (mode == IEEE80211_PROT_CTSONLY ||
 	    mode == IEEE80211_PROT_RTSCTS) {
-		if (ridx >= RTWN_RIDX_HT_MCS(0))
+		if (RTWN_RATE_IS_HT(ridx))
 			rate = rtwn_ctl_mcsrate(ic->ic_rt, ridx);
 		else
 			rate = ieee80211_ctl_rate(ic->ic_rt, ridx2rate[ridx]);
@@ -221,6 +220,28 @@ r92c_tx_setup_macid(void *buf, int id)
 	txd->txdw4 &= ~htole32(R92C_TXDW4_RTS_SHORT);
 }
 
+static int
+r92c_calculate_tx_agg_window(struct rtwn_softc *sc,
+    const struct ieee80211_node *ni, int tid)
+{
+	const struct ieee80211_tx_ampdu *tap;
+	int wnd;
+
+	tap = &ni->ni_tx_ampdu[tid];
+
+	/*
+	 * BAW is (MAX_AGG * 2) + 1, hence the /2 here.
+	 * Ensure we don't send 0 or more than 64.
+	 */
+	wnd = tap->txa_wnd / 2;
+	if (wnd == 0)
+		wnd = 1;
+	else if (wnd > 0x1f)
+		wnd = 0x1f;
+
+	return (wnd);
+}
+
 void
 r92c_fill_tx_desc(struct rtwn_softc *sc, struct ieee80211_node *ni,
     struct mbuf *m, void *buf, uint8_t ridx, int maxretry)
@@ -276,9 +297,9 @@ r92c_fill_tx_desc(struct rtwn_softc *sc, struct ieee80211_node *ni,
 			    (m->m_flags & M_AMPDU_MPDU) != 0);
 			if (m->m_flags & M_AMPDU_MPDU) {
 				txd->txdw2 |= htole32(SM(R92C_TXDW2_AMPDU_DEN,
-				    vap->iv_ampdu_density));
+				    ieee80211_ht_get_node_ampdu_density(ni)));
 				txd->txdw6 |= htole32(SM(R92C_TXDW6_MAX_AGG,
-				    0x1f));	/* XXX */
+				    r92c_calculate_tx_agg_window(sc, ni, tid)));
 			}
 			if (sc->sc_ratectl == RTWN_RATECTL_NET80211) {
 				txd->txdw2 |= htole32(R92C_TXDW2_CCX_RPT);
@@ -293,7 +314,7 @@ r92c_fill_tx_desc(struct rtwn_softc *sc, struct ieee80211_node *ni,
 				txd->txdw4 |= htole32(R92C_TXDW4_DATA_SHPRE);
 
 			prot = IEEE80211_PROT_NONE;
-			if (ridx >= RTWN_RIDX_HT_MCS(0)) {
+			if (RTWN_RATE_IS_HT(ridx)) {
 				r92c_tx_set_ht40(sc, txd, ni);
 				r92c_tx_set_sgi(sc, txd, ni);
 				prot = ic->ic_htprotmode;
